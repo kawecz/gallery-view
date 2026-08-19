@@ -1,4 +1,5 @@
 export type SortMethod = "alphabetical" | "properties" | "manual" | "checkbox";
+export type OpenMode = "source" | "preview";
 
 export interface FolderOverride {
 	folderPath: string;
@@ -31,6 +32,9 @@ export interface GalleryViewSettings {
 	showBookImport: boolean;
 	showGameImport: boolean;
 	showMovieImport: boolean;
+	showSeriesImport: boolean;
+	openMode: OpenMode;
+	hidePropertiesInReadMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: GalleryViewSettings = {
@@ -52,10 +56,14 @@ export const DEFAULT_SETTINGS: GalleryViewSettings = {
 	addPropertiesOnCreate: true,
 	youtubeApiKey: "",
 	tmdbApiKey: "",
+	googleBooksApiKey: "",
 	showYouTubeImport: true,
 	showBookImport: true,
 	showGameImport: true,
 	showMovieImport: true,
+	showSeriesImport: true,
+	openMode: "source",
+	hidePropertiesInReadMode: false,
 };
 
 export interface FrontmatterData {
@@ -98,6 +106,7 @@ export interface YouTubeOEmbedResponse {
 export interface GalleryViewState {
 	currentPath: string;
 	historyStack: string[];
+	isPopoutChild?: boolean;
 }
 
 // Book types for Open Library API
@@ -133,4 +142,15 @@ export interface TMDBMovie {
 	vote_average: number;
 	genres?: { name: string }[];
 	director?: string;
+}
+
+export interface TMDBSeries {
+	id: number;
+	name: string;
+	overview: string;
+	poster_path: string | null;
+	first_air_date: string;
+	vote_average: number;
+	genres?: { name: string }[];
+	number_of_seasons?: number;
 }

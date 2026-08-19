@@ -1,10 +1,11 @@
-import { Plugin, WorkspaceLeaf, TFile } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf, TFile } from "obsidian";
 import { GalleryDashboardView, VIEW_TYPE_GALLERY } from "./view";
 import { GalleryViewSettings, DEFAULT_SETTINGS } from "./types";
 import { GalleryViewSettingTab } from "./settings";
 import { GoogleBookModal } from "./modals/google-book";
 import { SteamGameModal } from "./modals/steam-game";
 import { MovieModal } from "./modals/movie";
+import { SeriesModal } from "./modals/series";
 import { getYouTubeDuration } from "./importers/youtube";
 
 export default class GalleryViewPlugin extends Plugin {
@@ -13,6 +14,11 @@ export default class GalleryViewPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new GalleryViewSettingTab(this.app, this));
+
+		// Apply the "hide properties in read mode" body class to the main
+		// window on startup, so the setting takes effect immediately
+		// without needing to open the settings tab first.
+		this.applyHidePropertiesClass(this.settings.hidePropertiesInReadMode);
 
 		this.registerView(
 			VIEW_TYPE_GALLERY,
@@ -78,6 +84,22 @@ export default class GalleryViewPlugin extends Plugin {
 				new MovieModal(this.app, apiKey, (movie) => {
 					void this.createMovieNote(
 						movie,
+						this.settings.rootSearchPath || "",
+					);
+				}).open();
+			},
+		});
+
+		// Series import command
+		this.addCommand({
+			id: "import-series",
+			name: "Import Series from TMDB",
+			callback: () => {
+				const apiKey = this.settings.tmdbApiKey;
+				if (!apiKey) return;
+				new SeriesModal(this.app, apiKey, (series) => {
+					void this.createSeriesNote(
+						series,
 						this.settings.rootSearchPath || "",
 					);
 				}).open();
@@ -177,6 +199,69 @@ export default class GalleryViewPlugin extends Plugin {
 		}
 	}
 
+	/*
+	 * v3.0.9: opens Obsidian's built-in "switch to another vault" flow
+	 * via the command palette's own command, instead of reimplementing
+	 * vault discovery/switching ourselves. The exact command id isn't
+	 * publicly documented, so we try the known id first and fall back
+	 * to searching registered commands by name.
+	 */
+	openVaultSwitcher() {
+		const appAny = this.app as unknown as {
+			commands: {
+				commands: Record<string, { id: string; name: string }>;
+				executeCommandById: (id: string) => boolean;
+			};
+		};
+
+		const knownId = "app:open-vault";
+		if (appAny.commands?.commands?.[knownId]) {
+			appAny.commands.executeCommandById(knownId);
+			return;
+		}
+
+		const fallback = Object.values(appAny.commands?.commands || {}).find(
+			(c) => /vault/i.test(c.name) && /(switch|open|manage)/i.test(c.name),
+		);
+
+		if (fallback) {
+			appAny.commands.executeCommandById(fallback.id);
+		} else {
+			new Notice(
+				"Could not find Obsidian's vault switcher command. Try the vault icon in the bottom-left sidebar instead.",
+			);
+		}
+	}
+
+	/*
+	 * v3.1.0: toggles a body class that CSS uses to hide the
+	 * frontmatter/properties block whenever a note is shown in Read
+	 * mode (Obsidian swaps .markdown-reading-view / .markdown-source-view
+	 * automatically on every mode switch, so this is a one-time class
+	 * toggle rather than something that needs to run per-file-open).
+	 *
+	 * Applies to every currently open window (main window + any
+	 * pop-out windows from the gallery's middle-click-to-pop-out
+	 * feature), since each pop-out has its own document and therefore
+	 * its own <body>.
+	 */
+	applyHidePropertiesClass(enabled: boolean) {
+		const docs = new Set<Document>();
+		docs.add(document);
+
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			const leafDoc = leaf.view.containerEl.ownerDocument;
+			if (leafDoc) docs.add(leafDoc);
+		});
+
+		docs.forEach((doc) => {
+			doc.body.toggleClass(
+				"gallery-view-hide-properties-read-mode",
+				enabled,
+			);
+		});
+	}
+
 	async loadSettings() {
 		const loadedData: unknown = await this.loadData();
 		this.settings = Object.assign(
@@ -191,6 +276,7 @@ export default class GalleryViewPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.applyHidePropertiesClass(this.settings.hidePropertiesInReadMode);
 		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_GALLERY);
 		for (const leaf of leaves) {
 			if (leaf.view instanceof GalleryDashboardView) {
@@ -545,6 +631,89 @@ export default class GalleryViewPlugin extends Plugin {
 			existingFm.tmdb_id = movie.tmdbId;
 		if (movie.description && !existingFm.about)
 			existingFm.about = movie.description;
+		if (this.settings.addPropertiesOnCreate && !existingFm.created) {
+			const dateStr = new Date().toISOString().split("T")[0];
+			if (dateStr) existingFm.created = dateStr;
+		}
+
+		const fmLines = Object.entries(existingFm).map(
+			([key, value]) => `${key}: "${String(value).replace(/"/g, '\\"')}"`,
+		);
+
+		// Empty body
+		const fileContents = `---\n${fmLines.join("\n")}\n---\n`;
+		await this.app.vault.modify(file, fileContents);
+	}
+
+	async createSeriesNote(
+		series: {
+			title: string;
+			creator: string;
+			year: string;
+			genres: string;
+			coverUrl: string;
+			description: string;
+			rating: string;
+			tmdbId: string;
+			seasons: string;
+		},
+		targetPath: string,
+	) {
+		const safeTitle = series.title.replace(/[\\/:?*"<>|]/g, " ");
+		let notePath = targetPath
+			? `${targetPath}/${safeTitle}.md`
+			: `${safeTitle}.md`;
+		let counter = 1;
+		while (this.app.vault.getAbstractFileByPath(notePath)) {
+			notePath = targetPath
+				? `${targetPath}/${safeTitle} ${counter}.md`
+				: `${safeTitle} ${counter}.md`;
+			counter++;
+		}
+
+		// Create empty file first
+		await this.app.vault.create(notePath, "");
+		await new Promise((resolve) => window.setTimeout(resolve, 200));
+
+		const file = this.app.vault.getAbstractFileByPath(notePath);
+		if (!(file instanceof TFile)) return;
+
+		const existingContent = await this.app.vault.read(file);
+
+		let existingFm: Record<string, unknown> = {};
+		const fmMatch = existingContent.match(/^---\n([\s\S]*?)\n---/);
+		if (fmMatch && fmMatch[1]) {
+			const lines = fmMatch[1].split("\n");
+			for (const line of lines) {
+				const colonIndex = line.indexOf(":");
+				if (colonIndex > 0) {
+					const key = line.substring(0, colonIndex).trim();
+					const value = line
+						.substring(colonIndex + 1)
+						.trim()
+						.replace(/^["']|["']$/g, "");
+					existingFm[key] = value;
+				}
+			}
+		}
+
+		existingFm.type = "series";
+		if (series.coverUrl && !existingFm.banner)
+			existingFm.banner = series.coverUrl;
+		if (series.title && !existingFm.title) existingFm.title = series.title;
+		if (series.creator && !existingFm.creator)
+			existingFm.creator = series.creator;
+		if (series.year && !existingFm.year) existingFm.year = series.year;
+		if (series.genres && !existingFm.genres)
+			existingFm.genres = series.genres;
+		if (series.rating && !existingFm.rating)
+			existingFm.rating = series.rating;
+		if (series.seasons && !existingFm.seasons)
+			existingFm.seasons = series.seasons;
+		if (series.tmdbId && !existingFm.tmdb_id)
+			existingFm.tmdb_id = series.tmdbId;
+		if (series.description && !existingFm.about)
+			existingFm.about = series.description;
 		if (this.settings.addPropertiesOnCreate && !existingFm.created) {
 			const dateStr = new Date().toISOString().split("T")[0];
 			if (dateStr) existingFm.created = dateStr;

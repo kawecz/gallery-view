@@ -1,6 +1,11 @@
 import esbuild from "esbuild";
 import process from "process";
-import { builtinModules } from 'node:module';
+import fs from "node:fs";
+import path from "node:path";
+import { builtinModules } from "node:module";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const banner =
 `/*
@@ -11,39 +16,89 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
+// Where your test vault's plugin folder lives. Set via OUT_DIR in a local
+// .env file (see .env.example) so this path never has to be committed.
+const OUT_DIR = process.env.OUT_DIR;
+
+if (!OUT_DIR) {
+	console.error(
+		'[esbuild] Missing OUT_DIR. Create a ".env" file in the project root ' +
+		'(see .env.example) and set OUT_DIR to your test vault\'s plugin folder.',
+	);
+	process.exit(1);
+}
+
+// Extra static files that need to land next to main.js for Obsidian to load the plugin.
+const STATIC_FILES = ["manifest.json", "styles.css"];
+
+function ensureOutDir() {
+    fs.mkdirSync(OUT_DIR, { recursive: true });
+}
+
+function copyStaticFiles() {
+for (const fileName of STATIC_FILES) {
+const src = path.resolve(fileName);
+const dest = path.join(OUT_DIR, fileName);
+
+if (!fs.existsSync(src)) {
+            console.warn(`[esbuild] Skipped copying "${fileName}" - not found at ${src}`);
+continue;
+        }
+
+        fs.copyFileSync(src, dest);
+    }
+}
+
+/** @type {import('esbuild').Plugin} */
+const copyStaticFilesPlugin = {
+    name: "copy-static-files",
+setup(build) {
+        build.onEnd((result) => {
+if (result.errors.length > 0) return;
+ensureOutDir();
+copyStaticFiles();
+            console.log(`[esbuild] Copied ${STATIC_FILES.join(", ")} -> ${OUT_DIR}`);
+        });
+    },
+};
+
+ensureOutDir();
+
 const context = await esbuild.context({
-	banner: {
-		js: banner,
-	},
-	entryPoints: ["src/main.ts"],
-	bundle: true,
-	external: [
-		"obsidian",
-		"electron",
-		"@codemirror/autocomplete",
-		"@codemirror/collab",
-		"@codemirror/commands",
-		"@codemirror/language",
-		"@codemirror/lint",
-		"@codemirror/search",
-		"@codemirror/state",
-		"@codemirror/view",
-		"@lezer/common",
-		"@lezer/highlight",
-		"@lezer/lr",
-		...builtinModules],
-	format: "cjs",
-	target: "es2018",
-	logLevel: "info",
-	sourcemap: prod ? false : "inline",
-	treeShaking: true,
-	outfile: "main.js",
-	minify: prod,
+    banner: {
+        js: banner,
+    },
+    entryPoints: ["src/main.ts"],
+    bundle: true,
+    external: [
+"obsidian",
+"electron",
+"@codemirror/autocomplete",
+"@codemirror/collab",
+"@codemirror/commands",
+"@codemirror/language",
+"@codemirror/lint",
+"@codemirror/search",
+"@codemirror/state",
+"@codemirror/view",
+"@lezer/common",
+"@lezer/highlight",
+"@lezer/lr",
+...builtinModules],
+    format: "cjs",
+    target: "es2018",
+    logLevel: "info",
+    sourcemap: prod ? false : "inline",
+    treeShaking: true,
+    outfile: path.join(OUT_DIR, "main.js"),
+    minify: prod,
+    plugins: [copyStaticFilesPlugin],
 });
 
 if (prod) {
-	await context.rebuild();
-	process.exit(0);
+await context.rebuild();
+await context.dispose();
+    process.exit(0);
 } else {
-	await context.watch();
+await context.watch();
 }

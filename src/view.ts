@@ -8,6 +8,7 @@ import {
 	setIcon,
 	Menu,
 	ViewStateResult,
+	Platform,
 } from "obsidian";
 import GalleryViewPlugin from "./main";
 import { SortMethod } from "./types";
@@ -18,6 +19,8 @@ import { YouTubeUrlPromptModal, YouTubeConfirmModal } from "./modals/youtube";
 import { GoogleBookModal } from "./modals/google-book";
 import { SteamGameModal } from "./modals/steam-game";
 import { MovieModal } from "./modals/movie";
+import { SeriesModal } from "./modals/series";
+import { SetBannerModal } from "./modals/set-banners";
 import { extractYouTubeVideoId, getYouTubeTitle } from "./importers/youtube";
 
 export const VIEW_TYPE_GALLERY = "gallery-view-dashboard";
@@ -49,6 +52,13 @@ export class GalleryDashboardView extends ItemView {
 	private isAddMenuOpen: boolean = false;
 	private shouldAnimate: boolean = true;
 
+	// v3.0.9: pop-out window identity. The very first Gallery View opened
+	// (via ribbon/command) is the "father" and keeps the default title.
+	// Views spawned via middle-click on a folder become "children" and
+	// get their window title renamed to the folder they're browsing.
+	private isMainWindow: boolean = true;
+	private customTitleSuffix: string | null = null;
+
 	constructor(leaf: WorkspaceLeaf, plugin: GalleryViewPlugin) {
 		super(leaf);
 		this.plugin = plugin;
@@ -62,7 +72,11 @@ export class GalleryDashboardView extends ItemView {
 	getViewType(): string {
 		return VIEW_TYPE_GALLERY;
 	}
+
 	getDisplayText(): string {
+		if (!this.isMainWindow && this.customTitleSuffix) {
+			return `Gallery View - ${this.customTitleSuffix}`;
+		}
 		return "Library Gallery";
 	}
 
@@ -70,7 +84,15 @@ export class GalleryDashboardView extends ItemView {
 		return {
 			currentPath: this.currentPath,
 			historyStack: this.historyStack,
+			isPopoutChild: !this.isMainWindow,
 		};
+	}
+
+	private isCheckboxChecked(value: unknown): boolean {
+		if (value === true) return true;
+		if (value === false || value === undefined || value === null)
+			return false;
+		return String(value).toLowerCase() === "true";
 	}
 
 	async setState(state: unknown, result: ViewStateResult) {
@@ -80,11 +102,46 @@ export class GalleryDashboardView extends ItemView {
 			this.historyStack = Array.isArray(typedState.historyStack)
 				? (typedState.historyStack as string[])
 				: [];
+
+			if (typedState.isPopoutChild === true) {
+				this.isMainWindow = false;
+				const segments = this.currentPath.split("/").filter(Boolean);
+				this.customTitleSuffix =
+					segments[segments.length - 1] ||
+					this.currentPath ||
+					"Gallery";
+				this.applyWindowTitle();
+			}
 		} else {
 			this.rebuildHistoryStack();
 		}
 		await this.renderCanvas();
 		return super.setState(state, result);
+	}
+
+	/*
+	 * Best-effort refresh of tab/window chrome after the display text
+	 * changes. Obsidian doesn't expose a stable public API for renaming
+	 * a pop-out window's title bar, so this tries the internal leaf
+	 * header refresh first, then falls back to touching the owner
+	 * document's title directly if this leaf lives in its own window.
+	 */
+	private applyWindowTitle() {
+		(
+			this.leaf as unknown as { updateHeader?: () => void }
+		).updateHeader?.();
+
+		window.setTimeout(() => {
+			try {
+				const win = (this.containerEl as HTMLElement & { win?: Window })
+					.win;
+				if (win && !this.isMainWindow) {
+					win.document.title = `${this.getDisplayText()} - Obsidian`;
+				}
+			} catch {
+				// Not a pop-out window, or the API isn't available — safe to ignore.
+			}
+		}, 50);
 	}
 
 	private getActiveFolderSize(): number {
@@ -303,7 +360,7 @@ export class GalleryDashboardView extends ItemView {
                 }
                 .gallery-view-grid {
                     display: grid;
-                    grid-template-columns: repeat(auto-fill, minmax(var(--card-custom-size, 200px), 1fr));
+                    grid-template-columns: repeat(auto-fill, minmax(min(var(--card-custom-size, 200px), max(38vw, 130px)), 1fr));
                     gap: 16px;
                     padding: 16px;
                 }
@@ -326,6 +383,10 @@ export class GalleryDashboardView extends ItemView {
                     }
                     .gallery-view-slider-row {
                         display: none !important;
+                    }
+                    .gallery-view-grid {
+                        gap: 10px;
+                        padding: 10px;
                     }
                 }
             `;
@@ -375,6 +436,20 @@ export class GalleryDashboardView extends ItemView {
 				})();
 			});
 		}
+
+		// v3.0.9: quick vault switcher, next to the back button
+		const vaultSwitchBtn = leftGroup.createEl("button", {
+			cls: "clickable-icon gallery-view-vault-switch-btn",
+			attr: {
+				title: "Switch Vault",
+				"aria-label": "Switch Vault",
+				style: "display: flex; align-items: center; justify-content: center; padding: 6px; border-radius: 4px; border: 1px solid var(--background-modifier-border); cursor: pointer;",
+			},
+		});
+		setIcon(vaultSwitchBtn, "arrow-left-right");
+		vaultSwitchBtn.addEventListener("click", () => {
+			this.plugin.openVaultSwitcher();
+		});
 
 		const grid = container.createDiv({
 			cls: `gallery-view-grid${this.shouldAnimate ? " fresh-load" : ""}`,
@@ -466,6 +541,25 @@ export class GalleryDashboardView extends ItemView {
 					this.plugin.settings.tmdbApiKey || "",
 					(movie) => {
 						void this.plugin.createMovieNote(movie, currentPath);
+						window.setTimeout(() => {
+							void this.renderCanvas();
+						}, 300);
+					},
+				).open();
+			});
+		}
+
+		if (
+			this.plugin.settings.showSeriesImport &&
+			this.plugin.settings.tmdbApiKey
+		) {
+			this.createPopoverMenuItem(popoverMenuEl, "📺 Import Series", () => {
+				const currentPath = this.currentPath || "";
+				new SeriesModal(
+					this.app,
+					this.plugin.settings.tmdbApiKey || "",
+					(series) => {
+						void this.plugin.createSeriesNote(series, currentPath);
 						window.setTimeout(() => {
 							void this.renderCanvas();
 						}, 300);
@@ -696,6 +790,32 @@ export class GalleryDashboardView extends ItemView {
 								(movie) => {
 									void this.plugin.createMovieNote(
 										movie,
+										currentPath,
+									);
+									window.setTimeout(() => {
+										void this.renderCanvas();
+									}, 300);
+								},
+							).open();
+						});
+				});
+			}
+
+			if (
+				this.plugin.settings.showSeriesImport &&
+				this.plugin.settings.tmdbApiKey
+			) {
+				menu.addItem((item) => {
+					item.setTitle("📺 Import Series")
+						.setIcon("tv")
+						.onClick(() => {
+							const currentPath = this.currentPath || "";
+							new SeriesModal(
+								this.app,
+								this.plugin.settings.tmdbApiKey || "",
+								(series) => {
+									void this.plugin.createSeriesNote(
+										series,
 										currentPath,
 									);
 									window.setTimeout(() => {
@@ -972,10 +1092,7 @@ export class GalleryDashboardView extends ItemView {
 							.checkbox;
 						if (checkboxVal === undefined || checkboxVal === null)
 							return 2;
-						return checkboxVal === true ||
-							String(checkboxVal).toLowerCase() === "true"
-							? 0
-							: 1;
+							return this.isCheckboxChecked(checkboxVal) ? 0 : 1;
 					};
 					const ca = getChecked(a);
 					const cb = getChecked(b);
@@ -1042,6 +1159,89 @@ export class GalleryDashboardView extends ItemView {
 					}
 				}
 			}
+		}
+	}
+
+	/*
+	 * v3.0.9: middle-click on a folder now pops it out into its own
+	 * Obsidian window and renames that window's title to
+	 * "Gallery View - <last path segment>". Mobile has no pop-out
+	 * windows, so it falls back to a regular tab there.
+	 */
+	private async openFolderInPopoutWindow(item: TAbstractFile) {
+		const leafType: "window" | "tab" = Platform.isMobile
+			? "tab"
+			: "window";
+		const leaf = this.app.workspace.getLeaf(leafType);
+		await leaf.setViewState({
+			type: VIEW_TYPE_GALLERY,
+			active: true,
+			state: {
+				currentPath: item.path,
+				historyStack: [...this.historyStack, this.currentPath],
+				isPopoutChild: leafType === "window",
+			},
+		});
+	}
+
+	/*
+	 * v3.0.9: opens a card's file respecting the configured
+	 * Read Mode / Edit Mode setting. PDFs ignore the mode setting.
+	 */
+	private async openFileWithMode(item: TFile, newLeaf: false | "tab") {
+		const leaf = this.app.workspace.getLeaf(newLeaf);
+		if (item.extension === "md") {
+			await leaf.openFile(item, {
+				state: { mode: this.plugin.settings.openMode },
+			});
+		} else {
+			await leaf.openFile(item);
+		}
+	}
+
+	/*
+	 * Reads the current banner for a card (folder override or file
+	 * frontmatter) so the Set Banner modal opens prefilled.
+	 */
+	private getCurrentBanner(item: TAbstractFile): string {
+		if (item instanceof TFolder) {
+			return this.plugin.settings.folderOverrides[item.path]?.bannerUrl || "";
+		}
+		if (item instanceof TFile) {
+			const cache = this.app.metadataCache.getFileCache(item);
+			return (cache?.frontmatter?.banner as string) || "";
+		}
+		return "";
+	}
+
+	/*
+	 * Saves a new banner from the context menu shortcut, for either a
+	 * folder (writes to folderOverrides) or a file (writes frontmatter).
+	 */
+	private async applyBanner(item: TAbstractFile, newUrl: string) {
+		if (item instanceof TFolder) {
+			const override =
+				this.plugin.settings.folderOverrides[item.path] ?? {
+					folderPath: item.path,
+					bannerUrl: "",
+					showSubs: false,
+				};
+			this.plugin.settings.folderOverrides[item.path] = override;
+			override.bannerUrl = newUrl;
+			await this.plugin.saveSettings();
+			await this.renderCanvas();
+		} else if (item instanceof TFile) {
+			await this.app.fileManager.processFrontMatter(
+				item,
+				(fm: Record<string, unknown>) => {
+					if (newUrl) {
+						fm.banner = newUrl;
+					} else {
+						delete fm.banner;
+					}
+				},
+			);
+			await this.renderCanvas();
 		}
 	}
 
@@ -1183,10 +1383,7 @@ export class GalleryDashboardView extends ItemView {
 			.createDiv({ cls: "gallery-view-card-title" })
 			.setText(usableName);
 
-		// Context menu (right-click)
-		// After creating the grid, add the right-click context menu:
-		// ===== CARD CONTEXT MENU (right-click on individual card) =====
-		// ===== CARD CONTEXT MENU (right-click on individual card) =====
+		// Context menu (right-click) — shared by folders and files
 		card.addEventListener("contextmenu", (e: MouseEvent) => {
 			e.preventDefault();
 			e.stopPropagation();
@@ -1200,6 +1397,23 @@ export class GalleryDashboardView extends ItemView {
 						new RenameModal(this.app, item, () => {
 							void this.renderCanvas();
 						}).open();
+					});
+			});
+
+			fileMenu.addItem((menuItem) => {
+				menuItem
+					.setTitle("Set Banner")
+					.setIcon("image")
+					.onClick(() => {
+						const currentUrl = this.getCurrentBanner(item);
+						new SetBannerModal(
+							this.app,
+							item.name,
+							currentUrl,
+							(newUrl) => {
+								void this.applyBanner(item, newUrl);
+							},
+						).open();
 					});
 			});
 
@@ -1288,25 +1502,11 @@ export class GalleryDashboardView extends ItemView {
 				}
 			}
 
-			// Folder card click - supports middle-click for new tab
+			// Folder card click - supports middle-click to pop out into a new window
 			card.addEventListener("click", (e: MouseEvent) => {
 				if (e.button === 1) {
-					// Middle click - open in new tab
 					e.preventDefault();
-					void (async () => {
-						const leaf = this.app.workspace.getLeaf("tab");
-						await leaf.setViewState({
-							type: VIEW_TYPE_GALLERY,
-							active: true,
-							state: {
-								currentPath: item.path,
-								historyStack: [
-									...this.historyStack,
-									this.currentPath,
-								],
-							},
-						});
-					})();
+					void this.openFolderInPopoutWindow(item);
 					return;
 				}
 				// Normal left click
@@ -1324,20 +1524,7 @@ export class GalleryDashboardView extends ItemView {
 			card.addEventListener("auxclick", (e: MouseEvent) => {
 				if (e.button === 1) {
 					e.preventDefault();
-					void (async () => {
-						const leaf = this.app.workspace.getLeaf("tab");
-						await leaf.setViewState({
-							type: VIEW_TYPE_GALLERY,
-							active: true,
-							state: {
-								currentPath: item.path,
-								historyStack: [
-									...this.historyStack,
-									this.currentPath,
-								],
-							},
-						});
-					})();
+					void this.openFolderInPopoutWindow(item);
 				}
 			});
 		} else if (item instanceof TFile) {
@@ -1424,13 +1611,14 @@ export class GalleryDashboardView extends ItemView {
 						cls: "gallery-view-props-container",
 					});
 
-					// Author / Director / Developer
+					// Author / Director / Developer / Creator
 					const authorKeys = [
 						"author",
 						"director",
 						"developer",
 						"writer",
 						"publisher",
+						"creator",
 					];
 					const authorKey = authorKeys.find(
 						(k) => frontmatter[k] !== undefined,
@@ -1547,6 +1735,24 @@ export class GalleryDashboardView extends ItemView {
 						});
 					}
 
+					// Seasons (TV series)
+					if (
+						frontmatter.seasons !== undefined &&
+						displayProps.includes("seasons")
+					) {
+						const seasonsRow = propsContainer.createDiv({
+							cls: "gallery-view-prop-row",
+						});
+						seasonsRow.createSpan({
+							cls: "gallery-view-prop-icon",
+							text: "📺",
+						});
+						seasonsRow.createSpan({
+							cls: "gallery-view-prop-value gallery-view-prop-seasons",
+							text: String(frontmatter.seasons),
+						});
+					}
+
 					// Any remaining custom properties not matched above
 					const handledKeys = [
 						...authorKeys,
@@ -1555,6 +1761,7 @@ export class GalleryDashboardView extends ItemView {
 						...statusKeys,
 						...genreKeys,
 						"isbn",
+						"seasons",
 						"type",
 						"banner",
 						"duration",
@@ -1602,6 +1809,7 @@ export class GalleryDashboardView extends ItemView {
 			}
 
 			// Enhanced checkbox
+					// Enhanced checkbox
 			if (this.plugin.settings.showCheckboxes && !isPdf) {
 				const hasCheckboxProperty =
 					Object.prototype.hasOwnProperty.call(
@@ -1609,7 +1817,12 @@ export class GalleryDashboardView extends ItemView {
 						"checkbox",
 					);
 				if (hasCheckboxProperty) {
-					const isChecked = Boolean(frontmatter["checkbox"]);
+					const isChecked = this.isCheckboxChecked(
+						frontmatter["checkbox"],
+					);
+
+					card.toggleClass("is-item-completed", isChecked);
+
 					const checkboxWrapper = infoSection.createDiv({
 						cls: "gallery-view-checkbox-wrapper",
 					});
@@ -1617,6 +1830,20 @@ export class GalleryDashboardView extends ItemView {
 					const customCheckbox = checkboxWrapper.createDiv({
 						cls: `gallery-view-custom-checkbox${isChecked ? " is-checked" : ""}`,
 					});
+
+					const checkSvg = customCheckbox.createSvg("svg", {
+						cls: "gallery-view-checkbox-svg",
+						attr: { viewBox: "0 0 24 24" },
+					});
+					checkSvg.createSvg("path", {
+						cls: "gallery-view-checkbox-check",
+						attr: { d: "M5 12.5L10 17.5L19 7" },
+					});
+
+					const rippleEl = customCheckbox.createDiv({
+						cls: "gallery-view-checkbox-ripple",
+					});
+
 					const checkboxLabel = checkboxWrapper.createSpan({
 						text: isChecked ? "Completed" : "Pending",
 						cls: "gallery-view-checkbox-label",
@@ -1642,28 +1869,31 @@ export class GalleryDashboardView extends ItemView {
 								customCheckbox.removeClass("is-checked");
 								checkboxLabel.setText("Pending");
 							}
+							card.toggleClass("is-item-completed", newValue);
+
+							rippleEl.removeClass("is-rippling");
+							void rippleEl.offsetWidth;
+							rippleEl.addClass("is-rippling");
 						})();
 					});
 				}
 			}
-
-			// File card click - supports middle-click for new tab
+			// File card click - supports middle-click for new tab, respects open mode
 			card.addEventListener("click", (e: MouseEvent) => {
 				if (e.button === 1) {
-					// Middle click - open in new tab
 					e.preventDefault();
-					void this.app.workspace.getLeaf("tab").openFile(item);
+					void this.openFileWithMode(item, "tab");
 					return;
 				}
 				// Normal left click
-				void this.app.workspace.getLeaf(false).openFile(item);
+				void this.openFileWithMode(item, false);
 			});
 
 			// Auxclick fallback for middle-click
 			card.addEventListener("auxclick", (e: MouseEvent) => {
 				if (e.button === 1) {
 					e.preventDefault();
-					void this.app.workspace.getLeaf("tab").openFile(item);
+					void this.openFileWithMode(item, "tab");
 				}
 			});
 		}

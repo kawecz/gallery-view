@@ -223,6 +223,37 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		new Setting(containerEl)
+			.setName("Open Card Files In")
+			.setDesc(
+				"Choose whether clicking a note card opens the file in Edit Mode or Read Mode. This doesn't apply to PDFs.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("source", "Edit Mode")
+					.addOption("preview", "Read Mode")
+					.setValue(this.plugin.settings.openMode)
+					.onChange(async (value) => {
+						this.plugin.settings.openMode =
+							value === "preview" ? "preview" : "source";
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Hide Properties in Read Mode")
+			.setDesc(
+				"Hides the frontmatter/properties block at the top of a note whenever it's displayed in Read Mode. Switching to Edit Mode shows it again automatically.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.hidePropertiesInReadMode)
+					.onChange(async (value) => {
+						this.plugin.settings.hidePropertiesInReadMode = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		new Setting(containerEl).setName("Import Configuration").setHeading();
 		new Setting(containerEl).setDesc(
 			"Choose which import options appear in the Add+ menu and right-click context menu.",
@@ -274,6 +305,20 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		new Setting(containerEl)
+			.setName("📺 Series Import (TMDB)")
+			.setDesc(
+				"Requires TMDB API key to function. Uses the same key as Movie Import.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showSeriesImport)
+					.onChange(async (value) => {
+						this.plugin.settings.showSeriesImport = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		new Setting(containerEl).setName("Asset Fallbacks").setHeading();
 
 		new Setting(containerEl)
@@ -313,8 +358,6 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl).setName("API Keys").setHeading();
-
-		// In settings.ts, find the API Keys section and update:
 
 		new Setting(containerEl)
 			.setName("YouTube Data API Key (optional)")
@@ -356,7 +399,7 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("TMDB API Key (optional)")
 			.setDesc(
-				"Required for importing movies. Get a free API key from https://www.themoviedb.org/settings/api",
+				"Required for importing movies and series. Get a free API key from https://www.themoviedb.org/settings/api",
 			)
 			.addText((text) => {
 				text.setPlaceholder("tmdb key...")
@@ -566,40 +609,14 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 				await this.plugin.saveSettings();
 			})();
 		});
-
-		collapseAllBtn.addEventListener("click", () => {
-			void (async () => {
-				const allContainers = treeWrapper.querySelectorAll(
-					".gallery-tree-nested-container",
-				) as NodeListOf<HTMLElement>;
-				const allToggles = treeWrapper.querySelectorAll(
-					".gallery-tree-toggle-btn",
-				) as NodeListOf<HTMLElement>;
-
-				allContainers.forEach((el) => {
-					el.setCssProps({ display: "none" });
-				});
-				allToggles.forEach((el) => {
-					el.textContent = "▸";
-				});
-
-				const updateShowSubs = (folder: TFolder) => {
-					const override =
-						this.plugin.settings.folderOverrides[folder.path];
-					if (override) {
-						override.showSubs = true;
-					}
-					folder.children
-						.filter((child) => child instanceof TFolder)
-						.forEach((child) => updateShowSubs(child));
-				};
-				folders.forEach((folder) => updateShowSubs(folder));
-
-				await this.plugin.saveSettings();
-			})();
-		});
 	}
 
+	/*
+	 * v3.0.10: rows now carry a data-depth-color attribute (level % 6)
+	 * so styles.css can cycle an accent color per nesting depth, and
+	 * the deepest indent guide gets a "-last" class so CSS can draw an
+	 * elbow connector (│ down to ─ across) instead of a plain line.
+	 */
 	private displayFolderTree(
 		containerEl: HTMLElement,
 		folder: TFolder,
@@ -626,6 +643,7 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 			cls: "gallery-tree-row",
 		});
 		rowWrapper.setAttr("data-level", String(level));
+		rowWrapper.setAttr("data-depth-color", String(level % 6));
 
 		const flexRow = rowWrapper.createDiv({
 			cls: "gallery-tree-flex-row",
@@ -636,7 +654,10 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 				cls: "gallery-tree-indent-line",
 			});
 			for (let i = 0; i < level; i++) {
-				spacer.createDiv({ cls: "gallery-tree-guide" });
+				const guide = spacer.createDiv({ cls: "gallery-tree-guide" });
+				if (i === level - 1) {
+					guide.addClass("gallery-tree-guide-last");
+				}
 			}
 		}
 
@@ -760,6 +781,10 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 						cls: "gallery-tree-row gallery-tree-pdf-row",
 					});
 					pdfRowWrapper.setAttr("data-level", String(level + 1));
+					pdfRowWrapper.setAttr(
+						"data-depth-color",
+						String((level + 1) % 6),
+					);
 					const pdfFlexRow = pdfRowWrapper.createDiv({
 						cls: "gallery-tree-flex-row",
 					});
@@ -768,7 +793,12 @@ export class GalleryViewSettingTab extends PluginSettingTab {
 							cls: "gallery-tree-indent-line",
 						});
 						for (let i = 0; i < level + 1; i++) {
-							spacer.createDiv({ cls: "gallery-tree-guide" });
+							const guide = spacer.createDiv({
+								cls: "gallery-tree-guide",
+							});
+							if (i === level) {
+								guide.addClass("gallery-tree-guide-last");
+							}
 						}
 					}
 					pdfFlexRow.createDiv({ cls: "gallery-tree-toggle-spacer" });
